@@ -7,6 +7,7 @@ import {
   type ActionCallbacksConfig,
 } from '../../../../../../src/api';
 import React from 'react';
+import * as solaanWeb3 from '@solana/web3.js'
 import { checkSecurity, type SecurityLevel } from '../../../../../../src/shared';
 import { ActionContainer } from '../../../../../../src/ui';
 import { noop } from '../../../../../../src/utils/constants';
@@ -74,6 +75,8 @@ const normalizeOptions = (
   };
 };
 
+
+// Modify the setupTwitterObserver function to use the snap
 export function setupTwitterObserver(
   config: ActionAdapter,
   callbacks: Partial<ActionCallbacksConfig> = {},
@@ -82,84 +85,78 @@ export function setupTwitterObserver(
   const mergedOptions = normalizeOptions(options);
   const twitterReactRoot = document.getElementById('react-root')!;
 
-  // if we don't have the registry, then we don't show anything
-    // entrypoint
-    const observer = new MutationObserver((mutations) => {
-      // it's fast to iterate like this
-      for (let i = 0; i < mutations.length; i++) {
-        const mutation = mutations[i];
-        for (let j = 0; j < mutation.addedNodes.length; j++) {
-          const node = mutation.addedNodes[j];
-          if (node.nodeType !== Node.ELEMENT_NODE) {
-            continue;
-          }
-          handleNewNode(
-            node as Element,
-            config,
-            callbacks,
-            mergedOptions,
-          ).catch(noop);
+  const observer = new MutationObserver((mutations) => {
+    for (let i = 0; i < mutations.length; i++) {
+      const mutation = mutations[i];
+      for (let j = 0; j < mutation.addedNodes.length; j++) {
+        const node = mutation.addedNodes[j];
+        if (node.nodeType !== Node.ELEMENT_NODE) {
+          continue;
         }
+        handleNewNode(
+          node as Element,
+          config,
+          callbacks,
+          mergedOptions,
+        ).catch(noop);
       }
-    });
-
-    if (twitterReactRoot instanceof Node) {
-      observer.observe(twitterReactRoot, { childList: true, subtree: true });
-    } else {
-      console.error('Twitter React root element not found or is not a valid Node');
     }
+  });
+
+  if (twitterReactRoot instanceof Node) {
+    observer.observe(twitterReactRoot, { childList: true, subtree: true });
+  } else {
+    console.error('Twitter React root element not found or is not a valid Node');
+  }
 }
 
-// New function to handle new nodes
+
 const handleNewNode = async (
   node: Element,
   config: ActionAdapter,
   callbacks: Partial<ActionCallbacksConfig>,
   options: NormalizedObserverOptions,
 ) => {
-  const element = node as Element;
-  // Find all t.co links
-  const tcoLinks = element.querySelectorAll('a[href^="https://t.co/"]');
+  const tcoLinks = node.querySelectorAll('a[href^="https://t.co/"]');
   if (tcoLinks.length === 0) {
     return;
   }
-  
-  // Process each t.co link
+
   tcoLinks.forEach(async (link) => {
     if (link instanceof HTMLAnchorElement) {
       console.log('Found t.co link:', link.href);
-      
-      // Create a container for the action content
+
       const container = document.createElement('div');
       container.className = 'action-content-container';
+      try {
+        const resolvedUrl = await resolveTwitterShortenedUrl(link.href);
 
-      // Resolve the shortened URL
-      resolveTwitterShortenedUrl(link.href)
-        .then(resolvedUrl => {
-          // Create an iframe to render the webapp
-          const iframe = document.createElement('iframe');
-          iframe.src = resolvedUrl.toString();
-          iframe.style.width = '100%';
-          iframe.style.height = '900px'; // Adjust height as needed
-          iframe.style.border = 'none';
+        const action = await Action.fetch(resolvedUrl.href, config).catch(() => null);
 
-          // Append the iframe to the container
-          container.appendChild(iframe);
+        if (!action) {
+          console.log('No action found for:', resolvedUrl.toString());
+          return;
+        }
 
-          // Replace the link with the container
-          link.parentElement?.replaceChild(container, link);
-
-          // Keep the original link text as a caption
-          const caption = document.createElement('div');
-          caption.textContent = link.textContent || link.href;
-          caption.style.fontSize = '0.8em';
-          caption.style.color = '#888';
-          container.appendChild(caption);
-        })
-        .catch(error => {
-          console.error('Error resolving shortened URL:', error);
-          container.textContent = 'Error loading content';
+        const actionContainer = createAction({
+          originalUrl: resolvedUrl,
+          action,
+          callbacks,
+          options,
+          isInterstitial: false,
         });
+
+        link.parentElement?.replaceChild(actionContainer, link);
+
+        const caption = document.createElement('div');
+        caption.textContent = link.textContent || link.href;
+        caption.style.fontSize = '0.8em';
+        caption.style.color = '#888';
+        actionContainer.appendChild(caption);
+      } catch (error) {
+        console.error('Error resolving shortened URL:', error);
+        container.textContent = 'Error loading content';
+      }
     }
   });
 };
@@ -202,6 +199,80 @@ async function resolveTwitterShortenedUrl(shortenedUrl: string): Promise<URL> {
   const actionUrl = doc.querySelector('title')?.textContent;
   return new URL(actionUrl!);
 }
+function injectMetaMaskButton() {
+  const button = document.createElement('button');
+  button.id = 'metamask-connect-button';
+  button.innerText = 'Connect MetaMask';
+  button.style.cssText = `
+    position: fixed;
+    top: 10px;
+    right: 10px;
+    z-index: 9999;
+    padding: 10px;
+    background-color: #f44336;
+    color: white;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+  `;
+  button.addEventListener('click', function() {
+    const script = document.createElement('script');
+    script.textContent = `
+      if (typeof window.solana !== 'undefined') {
+        (async () => {
+          try {
+            await window.solana.connect();
+            const publicKey = window.solana.publicKey.toString();
+            console.log('Connected to Solana wallet:', publicKey);
+            // Update button state
+            const button = document.getElementById('metamask-connect-button');
+            if (button) {
+              button.innerText = 'Connected: ' + publicKey.slice(0, 4) + '...' + publicKey.slice(-4);
+              button.style.backgroundColor = '#4CAF50';
+            }
+          } catch (error) {
+            console.error('Failed to connect to Solana wallet:', error);
+          }
+        })();
+      } else {
+        console.error('Solana wallet not detected');
+      }
+    `;
+    document.head.appendChild(script);
+  });
+  document.body.appendChild(button);
+}
+
+async function handleMetaMaskConnection() {
+  // @ts-ignore
+  if (typeof window.ethereum !== 'undefined') {
+    try {
+      // @ts-ignore
+      const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+      const account = accounts[0];
+      updateButtonState(true, account);
+    } catch (error) {
+      console.error('Failed to connect to MetaMask:', error);
+      updateButtonState(false);
+    }
+  } else {
+    console.error('MetaMask not detected');
+    updateButtonState(false);
+  }
+}
+
+function updateButtonState(isConnected: boolean, account?: string) {
+  const button = document.getElementById('metamask-connect-button');
+  if (button) {
+    if (isConnected && account) {
+      button.innerText = `Connected: ${account.slice(0, 6)}...${account.slice(-4)}`;
+      button.style.backgroundColor = '#4CAF50';
+    } else {
+      button.innerText = 'Connect MetaMask';
+      button.style.backgroundColor = '#f44336';
+    }
+  }
+}
 
 function findElementByTestId(element: Element, testId: string) {
   if (element.attributes.getNamedItem('data-testid')?.value === testId) {
@@ -211,44 +282,96 @@ function findElementByTestId(element: Element, testId: string) {
 }
 
 (async () => {
-  const endpoint = await getHttpEndpoint();
-  setupTwitterObserver(new ActionConfig(endpoint, {
+
+  setupTwitterObserver(new ActionConfig('https://rpc.ironforge.network/mainnet?apiKey=01HRZ9G6Z2A19FY8PR4RF4J4PW', {
     connect: async (context: ActionContext) => {
-      try {
-        // Remove hooks from here as they can't be used outside of React components
-        const tonConnectUI = (window as any).tonConnectUI;
-        if (!tonConnectUI) {
-          throw new Error('TON Connect UI not initialized');
-        }
-        await tonConnectUI.openModal();
-        const wallet = (window as any).tonWallet;
-        if (!wallet) {
-          throw new Error('Failed to connect TON wallet');
-        }
-        const address = wallet.address;
-        if (!address) {
-          throw new Error('Failed to get TON address');
-        }
-        return address;
-      } catch (error) {
-        console.error('Error connecting to TON wallet:', error);
-        throw error;
-      }
+      const script = document.createElement('script');
+      script.textContent = `
+        (async () => {
+          try {
+            if (!window.solana) {
+              throw new Error('Solana wallet not found');
+            }
+            await window.solana.connect();
+            const publicKey = window.solana.publicKey;
+            if (!publicKey) {
+              throw new Error('Failed to get Solana public key');
+            }
+            window.postMessage({ type: 'SOLANA_CONNECT_RESULT', publicKey: publicKey.toString() }, '*');
+          } catch (error) {
+            console.error('Error connecting to Solana wallet:', error);
+            window.postMessage({ type: 'SOLANA_CONNECT_ERROR', error: error.message }, '*');
+          }
+        })();
+      `;
+      
+      document.head.appendChild(script);
+      
+      return new Promise((resolve, reject) => {
+        window.addEventListener('message', function handler(event) {
+          if (event.data.type === 'SOLANA_CONNECT_RESULT') {
+            window.removeEventListener('message', handler);
+            resolve(event.data.publicKey);
+          } else if (event.data.type === 'SOLANA_CONNECT_ERROR') {
+            window.removeEventListener('message', handler);
+            reject(new Error(event.data.error));
+          }
+        });
+      });
     },
     signTransaction: async (tx: string, context: ActionContext) => {
-      try {
-        const { ton } = window as any;
-        if (!ton) {
-          throw new Error('TON wallet not found');
-        }
-        const transaction = ton.Transaction.from(Buffer.from(tx, 'base64'));
-        const signedTx = await ton.signTransaction(transaction);
-        const signature = await ton.sendTransaction(signedTx);
-        return { signature };
-      } catch (error: any) {
-        console.error('Error signing TON transaction:', error);
-        return { error: error.message };
-      }
+      return new Promise( (resolve, reject) => {
+        console.log('Starting signTransaction function');
+        const transactionBase64 = tx;
+        console.log('Transaction base64:', transactionBase64);
+        // Use the existing solanaWeb3 object
+        // Inject Solana Web3.js library from unpkg
+        const script = document.createElement('script');
+        script.src = 'https://unpkg.com/@solana/web3.js@latest/lib/index.iife.min.js';
+        script.onload = () => {
+          const mainScript = document.createElement('script');
+          mainScript.textContent = `
+          (async () => {
+            console.log('Executing script content');
+            
+            if (!window.solana) {
+              console.error('Solana wallet not found');
+              return;
+            }
+            
+            console.log('Solana wallet found');
+            const { Transaction } = solanaWeb3;
+            console.log('Transaction class retrieved from solanaWeb3');
+            
+            const fromBase64 = (base64) => {
+              console.log('Converting base64 to Uint8Array');
+              const binaryString = atob(base64);
+              const len = binaryString.length;
+              const bytes = new Uint8Array(len);
+              for (let i = 0; i < len; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+              }
+              console.log('Conversion complete');
+              return bytes;
+            };
+            
+            const transaction = Transaction.from(fromBase64('${transactionBase64}'));
+            console.log('Transaction created from base64');
+            
+            console.log('Signing transaction');
+            const signedTransaction = await window.solana.signTransaction(transaction);
+            console.log('Transaction signed');
+            const serializedTransaction = signedTransaction.serialize();
+            console.log('Transaction serialized');
+            
+            console.log('Posting message with signed transaction');
+            window.postMessage({ type: 'TRANSACTION_SIGNED_SOLANA', signature: serializedTransaction.toString('base64') }, '*');
+          })();
+          `;
+          document.head.appendChild(mainScript);
+        };
+        document.head.appendChild(script);
+      });
     }
   }));
 })();
